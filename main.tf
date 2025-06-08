@@ -7,6 +7,12 @@ terraform {
       version = "~> 5.0"
     }
   }
+  backend "s3" { # 変数化するとエラーになるためハードコーディング
+    bucket  = "tastylog-tfstate-buket-0821"
+    key     = "tastylog-dev.tfstate"
+    region  = "ap-northeast-1"
+    profile = "admin"
+  }
 }
 
 # プロバイダー
