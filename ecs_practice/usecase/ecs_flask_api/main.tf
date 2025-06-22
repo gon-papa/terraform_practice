@@ -27,7 +27,7 @@ data "aws_iam_policy_document" "ecs_task_execution_assume_role" {
     ]
     principals {
       identifiers = [
-        "ecs-tasks.amazon.com"
+        "ecs-tasks.amazonaws.com"
       ]
       type = "Service" # IAMなどの場合はAWSでOK
     }
@@ -82,7 +82,7 @@ data "aws_iam_policy_document" "ecs_task_assume_role" {
     ]
     principals {
       identifiers = [
-        "ecs-task.amazon.com"
+        "ecs-tasks.amazonaws.com"
       ]
       type = "Service"
     }
@@ -194,7 +194,7 @@ resource "aws_vpc_security_group_egress_rule" "ecs_instance_to_https" {
 }
 
 # ALB
-resource "aws_alb" "flask_api" {
+resource "aws_lb" "flask_api" {
   name               = "${var.stage}-flask-api-alb-tf"
   internal           = false
   load_balancer_type = "application"
@@ -229,5 +229,119 @@ resource "aws_lb_listener" "flask_api" {
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.flask_api.arn
+  }
+}
+
+# ECSタスク定義
+# リージョン問い合わせ
+data "aws_region" "current" {}
+
+# ECRリポジトリの取得
+data "aws_ecr_repository" "flask_api" {
+  name = "${var.stage}-flask-api-tf"
+}
+
+# ECSのロググループ
+resource "aws_cloudwatch_log_group" "flask_api" {
+  name = "/ecs/${var.stage}-flask-api-tf"
+  # ログ保存日数
+  retention_in_days = 90
+}
+
+# コンテナ定義をlocalsにしておき、ファイル内参照可能にしておく
+locals {
+  container_definitions = {
+    # flask_apiのコンテナのコンテナ定義
+    flask_api = {
+      name = "flask-api"
+
+      # SSMパラメータストアから環境変数として値を呼び出し(コンテナにセキュアに値を渡せる)
+      secrets = [
+        {
+          name      = "CORRECT_ANSWER"
+          valueFrom = data.aws_ssm_parameter.flask_api_correct_answer.arn
+        },
+      ]
+      essential = true
+      image     = "${data.aws_ecr_repository.flask_api.repository_url}:latest"
+      # ログ設定
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          # どのロググループに出すか
+          awslogs-group         = aws_cloudwatch_log_group.flask_api.name
+          awslogs-region        = data.aws_region.current.name
+          awslogs-stream-prefix = "flask_api"
+        }
+      }
+
+      portMappings = [
+        {
+          containerPort = 5000
+          hostPort      = 5000
+          protocol      = "tcp"
+        },
+      ]
+    }
+  }
+}
+
+resource "aws_ecs_task_definition" "flask_api" {
+  container_definitions = jsonencode( # HCL構文が含まれていてもjson変換してくれる
+    values(                           # valuesでlocals.container_definitions.flask_apiの部分だけを取り出し
+      local.container_definitions
+    )
+  )
+
+  cpu                = "256"                                    # 0.25 vCPU
+  execution_role_arn = aws_iam_role.ecs_task_execution_role.arn # タスク実行ロール（ECRからpull、CloudWatch Logsへのアクセスなど）
+  family             = "${var.stage}-falsk-api-tf"
+  memory             = "512" # メモリ512MB
+  network_mode       = "awsvpc"
+  requires_compatibilities = [
+    "FARGATE"
+  ]
+  task_role_arn = aws_iam_role.ecs_task.arn # タスクが実行中に使うIAMロール
+
+  # タスク定義の過去バージョンを削除しない
+  skip_destroy = true
+}
+
+# ECSサービス
+resource "aws_ecs_service" "flask_api" {
+  cluster                           = aws_ecs_cluster.flask_api.arn
+  desired_count                     = 0 # コンテナの起動数
+  enable_execute_command            = true
+  health_check_grace_period_seconds = 60
+  launch_type                       = "FARGATE"
+  name                              = "flask-api-tf"
+  task_definition                   = aws_ecs_task_definition.flask_api.arn
+
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = false
+  }
+
+  load_balancer {
+    # コンテナ定義をlocalsのマップしておくことでコンテナ名を参照可能になる
+    container_name   = local.container_definitions.flask_api.name
+    container_port   = 5000
+    target_group_arn = aws_lb_target_group.flask_api.arn
+  }
+
+  network_configuration {
+    security_groups = [
+      aws_security_group.ecs_instance.id
+    ]
+
+    subnets          = data.aws_subnets.public.ids
+    assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [
+      # 差分を無視する(コンテナの起動数は変動するため)
+      desired_count
+    ]
   }
 }

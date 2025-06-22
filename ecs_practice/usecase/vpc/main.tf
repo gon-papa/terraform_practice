@@ -51,6 +51,7 @@ module "vpc" {
   )
 
   manage_default_security_group  = true
+  manage_default_network_acl     = false
   default_security_group_ingress = []
   default_network_acl_egress     = []
 }

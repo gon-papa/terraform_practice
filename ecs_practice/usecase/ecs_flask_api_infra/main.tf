@@ -1,5 +1,5 @@
 # リポジトリ
-resource "aws_ecr_repository" "fkask_api" {
+resource "aws_ecr_repository" "flask_api" {
   name = "${var.stage}-flask-api-tf"
 }
 
